@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs::File, io::{self, BufRead}, path::Path, time::Instant};
+    fs::File, io::{self, BufRead, BufReader}, path::Path, time::Instant};
 
 struct Metrics {
     min: f32,
@@ -43,20 +43,48 @@ fn read_the_file<P>(filename: P) where P: AsRef<Path> {
     let now = Instant::now();
 
     let file = File::open(filename).unwrap();
-    let lines = io::BufReader::new(file).lines();
+    let mut reader = BufReader::new(file);
     let mut map = HashMap::<String, Metrics>::new();
+    let mut line = String::new();
     
-    for line in lines.flatten() {
-        let (city, temp) = line.split_once(';').unwrap();
-        let temperature: f32 = temp.parse().unwrap();
+    loop {
+        let result = reader.read_line(&mut line);
+        
+        match result {
+            Ok(value) => {
+                if value == 0 {
+                    break;
+                }
 
-        map.entry(city.to_string())
-        .and_modify(|metric| metric.update(temperature))
-        .or_insert_with(|| Metrics::new(temperature));
+                if line.ends_with("\n") || line.ends_with("\r") {
+                    line.pop();
+                }
+
+                let (city, temp) = line.split_once(';').unwrap();
+
+                let temp_result = temp.parse::<f32>();
+                let mut temperature = 0.0;
+
+                match temp_result {
+                    Ok(value) => {
+                        temperature = value;
+                    },
+                    Err(error) => {
+                        println!("Error: {}", error)
+                    }
+                }
+
+                map.entry(city.to_string())
+                    .and_modify(|metric| metric.update(temperature))
+                    .or_insert_with(|| Metrics::new(temperature));
+            },
+            Err(error) => {
+                println!("Error: {}", error)
+            },
+        }
+
+        line.clear();
     }
-
-    let mut elapsed = now.elapsed();
-    println!("Finished reading the file in: {:.2?}", elapsed);
 
     for city in map.keys() {
         let mean = mean(map[city].sum, map[city].count);
@@ -68,6 +96,6 @@ fn read_the_file<P>(filename: P) where P: AsRef<Path> {
                 \n\t mean: {}", city, map[city].min, map[city].max, map[city].sum, mean);
     }
 
-    elapsed = now.elapsed();
+    let elapsed = now.elapsed();
     println!("Finished printing the metrics in: {:.2?}", elapsed);
 }
