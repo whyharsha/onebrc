@@ -30,3 +30,7 @@ Still working with the mpsc channel. Will crossbeam make a difference? Let's see
 First it turns out using the fast_float to parse is good.
 
 Fifth attempt: Time to complete: 111.85 secs
+
+Changed a string to a u8 slice in the Hashmap to reduce some conversions. Also deleted the print statements.
+
+Sixth attempt: Time to complete: 106.96 secs

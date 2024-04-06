@@ -58,8 +58,6 @@ fn read_the_file<P>(filename: P) where P: AsRef<Path> {
     let mut buffer = vec![0; READ_BUFFER_SIZE];
     let mut unprocessed_part = 0;
 
-    let mut chunk_counter = 0;
-
     let num_of_threads: usize = std::thread::available_parallelism().unwrap().into();
     let thread_pool = ThreadPool::new(num_of_threads);
 
@@ -96,12 +94,8 @@ fn read_the_file<P>(filename: P) where P: AsRef<Path> {
         let boxed_buffer = Box::<[u8]>::from(&processed_buffer[..(new_line_index + 1)]);
         let local_sender = sender.clone();
 
-        chunk_counter += 1;
-
         thread_pool.execute(move || {
             local_sender.send(boxed_buffer).unwrap();
-
-            println!("Sent {} chunks", chunk_counter);
         });
 
         processed_buffer.copy_within((new_line_index + 1).., 0);
@@ -118,38 +112,33 @@ fn read_the_file<P>(filename: P) where P: AsRef<Path> {
         drop(sender); //drop the dangling sender since you've cloned one for each chunk
     }
 
-    let (final_sender, final_receiver) = mpsc::channel::<HashMap<String, Metrics>>();
-    let mut map_counter = 0;
+    let (final_sender, final_receiver) = mpsc::channel::<HashMap<Box<[u8]>, Metrics>>();
 
     for received in receiver {
-        let mut map = HashMap::<String, Metrics>::default();
+        let mut map = HashMap::<Box<[u8]>, Metrics>::default();
         
         for raw_line in received.lines_with_terminator() {
             let line = trim_new_line(raw_line);
-            let (city, temp) =
-                split_once_byte(line, VALUE_SEPARATOR).expect("Separator not found");
+            let (city, temp) = split_once_byte(line, VALUE_SEPARATOR).expect("Separator not found");
 
+            let city = Box::<[u8]>::from(city);
             let temperature = fast_float::parse::<f32, _>(temp).unwrap();
 
-            map.entry(city.to_str().unwrap().to_string())
+            map.entry(city)
                 .and_modify(|metric| metric.update(temperature))
                 .or_insert_with(|| Metrics::new(temperature));
         }
 
         let local_final_sender = final_sender.clone();
 
-        map_counter += 1;
-
         thread_pool.execute(move || {
             local_final_sender.send(map).unwrap();
-
-            println!("Sent {} maps", map_counter);
         });
     }
 
     drop(final_sender);
 
-    let mut final_map = HashMap::<String, Metrics>::default();
+    let mut final_map = HashMap::<Box<[u8]>, Metrics>::default();
 
     for final_received in final_receiver {
         for (city, temp_metric) in final_received {
@@ -166,7 +155,7 @@ fn read_the_file<P>(filename: P) where P: AsRef<Path> {
                 \n\t min: {}
                 \n\t max: {} 
                 \n\t sum: {}
-                \n\t mean: {}", city, final_map[city].min, final_map[city].max, final_map[city].sum, mean);
+                \n\t mean: {}", city.as_bstr(), final_map[city].min, final_map[city].max, final_map[city].sum, mean);
     }
 
     let elapsed = now.elapsed();
