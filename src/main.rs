@@ -1,6 +1,10 @@
 use std::{
-    collections::HashMap,
-    fs::File, io::{BufRead, BufReader}, path::Path, time::Instant};
+    collections::HashMap, fs::File, io::{ErrorKind, Read}, path::Path, sync::mpsc, time::Instant};
+use bstr::ByteSlice;
+use threadpool::ThreadPool;
+
+const READ_BUFFER_SIZE: usize = 256 * 1024; // 256 KiB
+const VALUE_SEPARATOR: u8 = b';';
 
 struct Metrics {
     min: f32,
@@ -43,104 +47,128 @@ fn mean(sum: f32, count: u64) -> f32 {
     sum / count as f32
 }
 
-//Read the file, calculate and print the metrics
 fn read_the_file<P>(filename: P) where P: AsRef<Path> {
-    
     println!("Start reading the file");
     let now = Instant::now();
 
-    let (sender, receiver) = std::sync::mpsc::channel::<HashMap<String, Metrics>>();
+    let (sender, receiver) = std::sync::mpsc::channel::<Box<[u8]>>();
 
-    let file = File::open(filename).unwrap();
-    let mut reader = BufReader::new(file);
+    let mut file = File::open(filename).unwrap();
 
-    let n_threads: usize = std::thread::available_parallelism().unwrap().into();
-    println!("Number of available threads is: {}", n_threads);
+    let mut buffer = vec![0; READ_BUFFER_SIZE];
+    let mut unprocessed_part = 0;
 
-    let mut line_count: i32 = 0;
-    let mut lines = Vec::<String>::new();
+    let mut chunk_counter = 0;
 
-    //Let's use 8 threads and read the file in 8 chunks of 125 mn lines each, see if we can process one chunk before the other is done
+    let num_of_threads: usize = std::thread::available_parallelism().unwrap().into();
+    let thread_pool = ThreadPool::new(num_of_threads);
+
     loop {
-        let mut line = String::new(); // losing the benefit of reusing the string due to the introduction of threads
-        let result = reader.read_line(& mut line);
-
-        match result {
-            Ok(value) => {
-                if value == 0 {
-                    break;
+        let bytes_read = match file.read(&mut buffer[unprocessed_part..]) {
+            Ok(n) => n,
+            Err(err) => {
+                if err.kind() == ErrorKind::Interrupted {
+                    continue; // Retry
+                } else {
+                    panic!("I/O error: {err:?}");
                 }
-
-                if line.ends_with("\n") || line.ends_with("\r") {
-                    line.pop();
-                }
-
-                lines.push(line);
-
-                
             }
-            Err(error) => {
-                println!("Error: {}", error)
-            },
+        };
+
+        if bytes_read == 0 {
+            break; // we've reached the end of the file
         }
 
-        line_count += 1;
+        let processed_buffer = &mut buffer[..(bytes_read + unprocessed_part)];
 
-        if line_count%125000000 == 0 {
-            println!("We have now read {} lines", line_count);
-            let elapsed = now.elapsed();
-            println!("Finished reading in: {:.2?}", elapsed);
-
-            let local_sender = sender.clone();
-            let completed_lines = lines.clone(); //huge costs I'm paying by cloning, not sure what the trade off is
-
-            std::thread::spawn(move || {
-                let mut map = HashMap::<String, Metrics>::new();
-
-                for line in completed_lines {
-                    let (city, temp) = line.split_once(';').unwrap();
-
-                    let temp_result = temp.parse::<f32>();
-                    let mut temperature = 0.0;
-
-                    match temp_result {
-                        Ok(value) => {
-                            temperature = value;
-                        },
-                        Err(error) => {
-                            println!("Error: {}", error)
-                        }
-                    }
-
-                    map.entry(city.to_string())
-                        .and_modify(|metric| metric.update(temperature))
-                        .or_insert_with(|| Metrics::new(temperature));
+        let new_line_index = match processed_buffer.iter().rposition(|&b| b == b'\n') {
+            Some(pos) => pos,
+            None => {
+                unprocessed_part += bytes_read;
+                assert!(unprocessed_part <= buffer.len());
+                if unprocessed_part == buffer.len() {
+                    panic!("Found no new line in the whole read buffer");
                 }
+                continue; // Read again, maybe next read contains a new line
+            }
+        };
 
-                local_sender.send(map).unwrap();
-                println!("Sent a chunk of data for processing");
-                let elapsed = now.elapsed();
-                println!("Finished processing in: {:.2?}", elapsed);
-            });
+        let boxed_buffer = Box::<[u8]>::from(&processed_buffer[..(new_line_index + 1)]);
+        let local_sender = sender.clone();
 
-            lines.clear();
-        }
+        chunk_counter += 1;
+
+        thread_pool.execute(move || {
+            local_sender.send(boxed_buffer).unwrap();
+
+            println!("Sent {} chunks", chunk_counter);
+        });
+
+        processed_buffer.copy_within((new_line_index + 1).., 0);
+        unprocessed_part = processed_buffer.len() - new_line_index - 1;
     }
 
-    drop(sender); //it's cloned for all senders, so need to drop it.
+    // Handle the case when the file doesn't end with '\n'
+    if unprocessed_part != 0 {
+        // Send the last batch
+        let boxed_buffer = Box::<[u8]>::from(&buffer[..unprocessed_part]);
+        sender.send(boxed_buffer).unwrap();
+        unprocessed_part = 0;
+    } else {
+        drop(sender); //drop the dangling sender since you've cloned one for each chunk
+    }
 
-    let mut final_map = HashMap::<String, Metrics>::new();
+    let (final_sender, final_receiver) = mpsc::channel::<HashMap<String, Metrics>>();
+    let mut map_counter = 0;
 
     for received in receiver {
-        for (city, temp_metric) in received {
+        let mut map = HashMap::<String, Metrics>::default();
+        
+        for raw_line in received.lines_with_terminator() {
+            let line = trim_new_line(raw_line);
+            let (city, temp) =
+                split_once_byte(line, VALUE_SEPARATOR).expect("Separator not found");
+
+            let temp = temp.to_str().unwrap().parse::<f32>();
+            let mut temperature = 0.0;
+
+            match temp {
+                Ok(value) => {
+                    temperature = value;
+                },
+                Err(error) => {
+                    println!("Error: {}", error)
+                }
+            }
+
+            map.entry(city.to_str().unwrap().to_string())
+                .and_modify(|metric| metric.update(temperature))
+                .or_insert_with(|| Metrics::new(temperature));
+        }
+        
+
+        let local_final_sender = final_sender.clone();
+
+        map_counter += 1;
+
+        std::thread::spawn(move || {
+            local_final_sender.send(map).unwrap();
+
+            println!("Sent {} maps", map_counter);
+        });
+    }
+
+    drop(final_sender);
+
+    let mut final_map = HashMap::<String, Metrics>::default();
+
+    for final_received in final_receiver {
+        for (city, temp_metric) in final_received {
             final_map.entry(city)
                 .and_modify(|metric| metric.compare_and_update(&temp_metric))
                 .or_insert(temp_metric);
         }
-        println!("Just checking if this is being processed");
     }
-
-    println!("Just checking if final map is ready for printing");
 
     for city in final_map.keys() {
         let mean = mean(final_map[city].sum, final_map[city].count);
@@ -154,4 +182,26 @@ fn read_the_file<P>(filename: P) where P: AsRef<Path> {
 
     let elapsed = now.elapsed();
     println!("Finished printing the metrics in: {:.2?}", elapsed);
+
+}
+
+//Borrowed these parts of the code as I read up on better file reading options online
+fn trim_new_line(s: &[u8]) -> &[u8] {
+    let mut trimmed = s;
+    if trimmed.last_byte() == Some(b'\n') {
+        trimmed = &trimmed[..trimmed.len() - 1];
+        if trimmed.last_byte() == Some(b'\r') {
+            trimmed = &trimmed[..trimmed.len() - 1];
+        }
+    }
+    trimmed
+}
+
+//Borrowed these parts of the code as I read up on better file reading options online
+fn split_once_byte(haystack: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
+    let Some(pos) = haystack.iter().position(|&b| b == needle) else {
+        return None;
+    };
+
+    Some((&haystack[..pos], &haystack[pos + 1..]))
 }
