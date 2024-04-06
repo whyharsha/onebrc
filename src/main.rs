@@ -129,29 +129,18 @@ fn read_the_file<P>(filename: P) where P: AsRef<Path> {
             let (city, temp) =
                 split_once_byte(line, VALUE_SEPARATOR).expect("Separator not found");
 
-            let temp = temp.to_str().unwrap().parse::<f32>();
-            let mut temperature = 0.0;
-
-            match temp {
-                Ok(value) => {
-                    temperature = value;
-                },
-                Err(error) => {
-                    println!("Error: {}", error)
-                }
-            }
+            let temperature = fast_float::parse::<f32, _>(temp).unwrap();
 
             map.entry(city.to_str().unwrap().to_string())
                 .and_modify(|metric| metric.update(temperature))
                 .or_insert_with(|| Metrics::new(temperature));
         }
-        
 
         let local_final_sender = final_sender.clone();
 
         map_counter += 1;
 
-        std::thread::spawn(move || {
+        thread_pool.execute(move || {
             local_final_sender.send(map).unwrap();
 
             println!("Sent {} maps", map_counter);

@@ -7,4 +7,6 @@ edition = "2021"
 
 [dependencies]
 bstr = "1.9.1"
+crossbeam-channel = "0.5.12"
+fast-float = "0.2.0"
 threadpool = "1.8.1"

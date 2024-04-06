@@ -1,6 +1,8 @@
 A Rust based attempt at the One Billion Rows challenge. Teaching myself a little Rust along the way.
 
 System Spec: Macbook Pro M3 with 8 GB RAM. The measurements file is 13.2 GB.
+My measurements are very unscientific. I'm just looking to improve my understanding and learn some Rust along the way.
+But they offer some directional validation of the improvements.
 
 First naive implementation: Try going line by line and compute the metrics using a buffered reader. Time to complete: 694.01 secs
 
@@ -24,3 +26,7 @@ I also learned to add the --release option while running the code. Feeling more 
 Fourth attempt: Using a threadpool and fixed size chunks with the release mode. Time to complete: 124.63 secs
 
 Still working with the mpsc channel. Will crossbeam make a difference? Let's see.
+
+First it turns out using the fast_float to parse is good.
+
+Fifth attempt: Time to complete: 111.85 secs
