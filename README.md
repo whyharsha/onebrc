@@ -19,7 +19,7 @@ Made two major changes.
 
 Reading in fixed size chunks required some additional code to handle the end of line and separators.
 
-I also learned to add the --release option while running the code.
+I also learned to add the --release option while running the code. Feeling more than a little stupid. Should go back and rerun the earlier attempts also.
 
 Fourth attempt: Using a threadpool and fixed size chunks with the release mode. Time to complete: 124.63 secs
 
