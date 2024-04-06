@@ -60,7 +60,7 @@ fn read_the_file<P>(filename: P) where P: AsRef<Path> {
     let mut line_count: i32 = 0;
     let mut lines = Vec::<String>::new();
 
-    //Let's use 5 threads and read the file in 8 chunks of 200 mn lines each, see if we can process one chunk before the other is done
+    //Let's use 8 threads and read the file in 8 chunks of 125 mn lines each, see if we can process one chunk before the other is done
     loop {
         let mut line = String::new(); // losing the benefit of reusing the string due to the introduction of threads
         let result = reader.read_line(& mut line);
