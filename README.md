@@ -34,3 +34,5 @@ Fifth attempt: Time to complete: 111.85 secs
 Changed a string to a u8 slice in the Hashmap to reduce some conversions. Also deleted the print statements.
 
 Sixth attempt: Time to complete: 106.96 secs
+
+Seventh attempt: Fixed some parsing issues. Time to complete: 53.23 secs

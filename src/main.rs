@@ -1,9 +1,9 @@
 use std::fs::File;
 use std::io::{Read, ErrorKind};
 use threadpool;
-use std::{collections::HashMap, time::Instant};
+use std::collections::HashMap;
 
-const CHUNK_CHANNEL_BUFFER_CAP: usize = 15;
+const CHUNK_CHANNEL_BUFFER_CAP: usize = 1000;
 const CHUNK_SIZE: usize = 128 * 1024; //128kiB
 const VALUE_SEPARATOR: u8 = b';';
 const NEW_LINE: u8 = b'\n';
@@ -31,13 +31,6 @@ impl Metrics {
         self.sum += next;
         self.count += 1;    
     }
-
-    // fn compare_and_update(&mut self, metric: &Metrics) {
-    //     self.min = self.min.min(metric.min);
-    //     self.max = self.max.max(metric.max);
-    //     self.sum += metric.sum;
-    //     self.count += metric.count;
-    // }
 }
 
 fn mean(sum: f32, count: u64) -> f32 {
@@ -51,8 +44,6 @@ fn main() {
 }
 
 fn read_the_file(filename: &str) {
-    let now = Instant::now();
-
     let num_of_threads: usize = std::thread::available_parallelism().unwrap().into();
     let thread_pool = threadpool::ThreadPool::new(num_of_threads);
     
@@ -154,7 +145,4 @@ fn read_the_file(filename: &str) {
                 \n\t sum: {}
                 \n\t mean: {}", city, map[city].min, map[city].max, map[city].sum, mean);
     }
-
-    let elapsed = now.elapsed();
-    println!("Finished printing the metrics in: {:.2?}", elapsed);
 }
