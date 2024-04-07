@@ -6,6 +6,8 @@ But they offer some directional validation of the improvements.
 
 First naive implementation: Try going line by line and compute the metrics using a buffered reader. Time to complete: 73.81 secs
 
+Second attempt: Remove the new string alloc on every read line. Time to complete: 60.73 secs
+
 Fourth attempt: Fixed some parsing issues. Time to complete: 53.23 secs
 
 Fifth attempt: Cleaned up another unnecessary parse. Time to complete: 25.67 secs
