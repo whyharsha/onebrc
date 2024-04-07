@@ -36,3 +36,5 @@ Changed a string to a u8 slice in the Hashmap to reduce some conversions. Also d
 Sixth attempt: Time to complete: 106.96 secs
 
 Seventh attempt: Fixed some parsing issues. Time to complete: 53.23 secs
+
+Eighth attempt: Cleaned up another unnecessary parse. Time to complete: 25.67 secs

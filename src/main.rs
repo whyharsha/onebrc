@@ -1,7 +1,8 @@
 use std::fs::File;
 use std::io::{Read, ErrorKind};
 use threadpool;
-use std::collections::HashMap;
+use hashbrown::HashMap;
+use bstr::ByteSlice;
 
 const CHUNK_CHANNEL_BUFFER_CAP: usize = 1000;
 const CHUNK_SIZE: usize = 128 * 1024; //128kiB
@@ -51,7 +52,7 @@ fn read_the_file(filename: &str) {
 
     let (chunk_sender, chunk_receiver) = crossbeam_channel::bounded::<Box::<[u8]>>(CHUNK_CHANNEL_BUFFER_CAP);
 
-    let mut map = HashMap::<String, Metrics>::new();
+    let mut map = HashMap::<Box<[u8]>, Metrics>::new();
 
     let mut buffer = vec![0; CHUNK_SIZE];
     let mut unprocessed_part  = 0;
@@ -117,14 +118,14 @@ fn read_the_file(filename: &str) {
                     end_idx = idx;
                 },
                 &NEW_LINE => {
-                    let city = std::str::from_utf8(&chunk[start_idx..end_idx]).unwrap().to_string();
+                    let city = &chunk[start_idx..end_idx];
                     start_idx = end_idx + 1;
 
                     if (idx - end_idx) > 1 && city.len() > 0 {
                         let temperature: f32 = fast_float::parse::<f32, _>(&chunk[start_idx..idx]).unwrap();
                         start_idx = idx + 1;
 
-                        map.entry(city)
+                        map.entry_ref(city)
                             .and_modify(|metric| metric.update(temperature))
                             .or_insert_with(|| Metrics::new(temperature));
                     }
@@ -136,13 +137,16 @@ fn read_the_file(filename: &str) {
         }
     }
 
-    for city in map.keys() {
-        let mean = mean(map[city].sum, map[city].count);
+    let mut ordered_map = std::collections::BTreeMap::new();
+    ordered_map.extend(map);
+
+    for city in ordered_map.keys() {
+        let mean = mean(ordered_map[city].sum, ordered_map[city].count);
 
         println!("{}:
                 \n\t min: {}
                 \n\t max: {} 
                 \n\t sum: {}
-                \n\t mean: {}", city, map[city].min, map[city].max, map[city].sum, mean);
+                \n\t mean: {}", city.as_bstr(), ordered_map[city].min, ordered_map[city].max, ordered_map[city].sum, mean);
     }
 }
