@@ -1,10 +1,12 @@
-use std::{
-    collections::HashMap, fs::File, io::{ErrorKind, Read}, path::Path, sync::mpsc, time::Instant};
-use bstr::ByteSlice;
-use threadpool::ThreadPool;
+use std::fs::File;
+use std::io::{Read, ErrorKind};
+use threadpool;
+use std::{collections::HashMap, time::Instant};
 
-const READ_BUFFER_SIZE: usize = 256 * 1024; // 256 KiB
+const CHUNK_CHANNEL_BUFFER_CAP: usize = 15;
+const CHUNK_SIZE: usize = 128 * 1024; //128kiB
 const VALUE_SEPARATOR: u8 = b';';
+const NEW_LINE: u8 = b'\n';
 
 struct Metrics {
     min: f32,
@@ -30,36 +32,38 @@ impl Metrics {
         self.count += 1;    
     }
 
-    fn compare_and_update(&mut self, metric: &Metrics) {
-        self.min = self.min.min(metric.min);
-        self.max = self.max.max(metric.max);
-        self.sum += metric.sum;
-        self.count += metric.count;
-    }
-}
-
-fn main() {
-    //std::env::set_var("RUST_BACKTRACE", "full");
-    read_the_file("./measurements.txt");
+    // fn compare_and_update(&mut self, metric: &Metrics) {
+    //     self.min = self.min.min(metric.min);
+    //     self.max = self.max.max(metric.max);
+    //     self.sum += metric.sum;
+    //     self.count += metric.count;
+    // }
 }
 
 fn mean(sum: f32, count: u64) -> f32 {
     sum / count as f32
 }
 
-fn read_the_file<P>(filename: P) where P: AsRef<Path> {
-    println!("Start reading the file");
+fn main() {
+    println!("Start reading the file.");
+    let filename = "./measurements.txt";
+    read_the_file(filename);
+}
+
+fn read_the_file(filename: &str) {
     let now = Instant::now();
 
-    let (sender, receiver) = std::sync::mpsc::channel::<Box<[u8]>>();
-
+    let num_of_threads: usize = std::thread::available_parallelism().unwrap().into();
+    let thread_pool = threadpool::ThreadPool::new(num_of_threads);
+    
     let mut file = File::open(filename).unwrap();
 
-    let mut buffer = vec![0; READ_BUFFER_SIZE];
-    let mut unprocessed_part = 0;
+    let (chunk_sender, chunk_receiver) = crossbeam_channel::bounded::<Box::<[u8]>>(CHUNK_CHANNEL_BUFFER_CAP);
 
-    let num_of_threads: usize = std::thread::available_parallelism().unwrap().into();
-    let thread_pool = ThreadPool::new(num_of_threads);
+    let mut map = HashMap::<String, Metrics>::new();
+
+    let mut buffer = vec![0; CHUNK_SIZE];
+    let mut unprocessed_part  = 0;
 
     loop {
         let bytes_read = match file.read(&mut buffer[unprocessed_part..]) {
@@ -92,7 +96,7 @@ fn read_the_file<P>(filename: P) where P: AsRef<Path> {
         };
 
         let boxed_buffer = Box::<[u8]>::from(&processed_buffer[..(new_line_index + 1)]);
-        let local_sender = sender.clone();
+        let local_sender = chunk_sender.clone();
 
         thread_pool.execute(move || {
             local_sender.send(boxed_buffer).unwrap();
@@ -106,80 +110,51 @@ fn read_the_file<P>(filename: P) where P: AsRef<Path> {
     if unprocessed_part != 0 {
         // Send the last batch
         let boxed_buffer = Box::<[u8]>::from(&buffer[..unprocessed_part]);
-        sender.send(boxed_buffer).unwrap();
+        chunk_sender.send(boxed_buffer).unwrap();
         unprocessed_part = 0;
     } else {
-        drop(sender); //drop the dangling sender since you've cloned one for each chunk
+        drop(chunk_sender); //drop the dangling sender since you've cloned one for each chunk
     }
 
-    let (final_sender, final_receiver) = mpsc::channel::<HashMap<Box<[u8]>, Metrics>>();
+    for chunk in chunk_receiver {
+        let mut start_idx = 0;
+        let mut end_idx = 0;
+    
+        for (idx, elem) in (*chunk).iter().enumerate() {
+            match elem {
+                &VALUE_SEPARATOR => {
+                    end_idx = idx;
+                },
+                &NEW_LINE => {
+                    let city = std::str::from_utf8(&chunk[start_idx..end_idx]).unwrap().to_string();
+                    start_idx = end_idx + 1;
 
-    for received in receiver {
-        let mut map = HashMap::<Box<[u8]>, Metrics>::default();
-        
-        for raw_line in received.lines_with_terminator() {
-            let line = trim_new_line(raw_line);
-            let (city, temp) = split_once_byte(line, VALUE_SEPARATOR).expect("Separator not found");
+                    if (idx - end_idx) > 1 && city.len() > 0 {
+                        let temperature: f32 = fast_float::parse::<f32, _>(&chunk[start_idx..idx]).unwrap();
+                        start_idx = idx + 1;
 
-            let city = Box::<[u8]>::from(city);
-            let temperature = fast_float::parse::<f32, _>(temp).unwrap();
-
-            map.entry(city)
-                .and_modify(|metric| metric.update(temperature))
-                .or_insert_with(|| Metrics::new(temperature));
-        }
-
-        let local_final_sender = final_sender.clone();
-
-        thread_pool.execute(move || {
-            local_final_sender.send(map).unwrap();
-        });
-    }
-
-    drop(final_sender);
-
-    let mut final_map = HashMap::<Box<[u8]>, Metrics>::default();
-
-    for final_received in final_receiver {
-        for (city, temp_metric) in final_received {
-            final_map.entry(city)
-                .and_modify(|metric| metric.compare_and_update(&temp_metric))
-                .or_insert(temp_metric);
+                        map.entry(city)
+                            .and_modify(|metric| metric.update(temperature))
+                            .or_insert_with(|| Metrics::new(temperature));
+                    }
+                },
+                _ => {
+                    continue;
+                },
+            };
         }
     }
 
-    for city in final_map.keys() {
-        let mean = mean(final_map[city].sum, final_map[city].count);
+    for city in map.keys() {
+        let mean = mean(map[city].sum, map[city].count);
 
         println!("{}:
                 \n\t min: {}
                 \n\t max: {} 
                 \n\t sum: {}
-                \n\t mean: {}", city.as_bstr(), final_map[city].min, final_map[city].max, final_map[city].sum, mean);
+                \n\t mean: {}", city, map[city].min, map[city].max, map[city].sum, mean);
     }
 
     let elapsed = now.elapsed();
     println!("Finished printing the metrics in: {:.2?}", elapsed);
-
-}
-
-//Borrowed these parts of the code as I read up on better file reading options online
-fn trim_new_line(s: &[u8]) -> &[u8] {
-    let mut trimmed = s;
-    if trimmed.last_byte() == Some(b'\n') {
-        trimmed = &trimmed[..trimmed.len() - 1];
-        if trimmed.last_byte() == Some(b'\r') {
-            trimmed = &trimmed[..trimmed.len() - 1];
-        }
-    }
-    trimmed
-}
-
-//Borrowed these parts of the code as I read up on better file reading options online
-fn split_once_byte(haystack: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
-    let Some(pos) = haystack.iter().position(|&b| b == needle) else {
-        return None;
-    };
-
-    Some((&haystack[..pos], &haystack[pos + 1..]))
 }
