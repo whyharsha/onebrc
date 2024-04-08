@@ -7,7 +7,6 @@ use bstr::ByteSlice;
 const CHUNK_CHANNEL_BUFFER_CAP: usize = 1000;
 const CHUNK_SIZE: usize = 128 * 1024; //128kiB
 const VALUE_SEPARATOR: u8 = b';';
-const NEW_LINE: u8 = b'\n';
 
 struct Metrics {
     min: f32,
@@ -47,8 +46,6 @@ fn main() {
 fn read_the_file(filename: &str) {
     let num_of_threads: usize = std::thread::available_parallelism().unwrap().into();
     let thread_pool = threadpool::ThreadPool::new(num_of_threads);
-    
-    let mut file = File::open(filename).unwrap();
 
     let (chunk_sender, chunk_receiver) = crossbeam_channel::bounded::<Box::<[u8]>>(CHUNK_CHANNEL_BUFFER_CAP);
 
@@ -56,6 +53,8 @@ fn read_the_file(filename: &str) {
 
     let mut buffer = vec![0; CHUNK_SIZE];
     let mut unprocessed_part  = 0;
+
+    let mut file = File::open(filename).unwrap();
 
     loop {
         let bytes_read = match file.read(&mut buffer[unprocessed_part..]) {
@@ -108,32 +107,16 @@ fn read_the_file(filename: &str) {
         drop(chunk_sender); //drop the dangling sender since you've cloned one for each chunk
     }
 
-    for chunk in chunk_receiver {
-        let mut start_idx = 0;
-        let mut end_idx = 0;
-    
-        for (idx, elem) in (*chunk).iter().enumerate() {
-            match elem {
-                &VALUE_SEPARATOR => {
-                    end_idx = idx;
-                },
-                &NEW_LINE => {
-                    let city = &chunk[start_idx..end_idx];
-                    start_idx = end_idx + 1;
+    for buf in chunk_receiver {
+        for raw_line in buf.lines_with_terminator() {
+            let line = trim_new_line(raw_line);
+            let (city, temp) =
+                split_once_byte(line, VALUE_SEPARATOR).expect("Separator not found");
 
-                    if (idx - end_idx) > 1 && city.len() > 0 {
-                        let temperature: f32 = fast_float::parse::<f32, _>(&chunk[start_idx..idx]).unwrap();
-                        start_idx = idx + 1;
-
-                        map.entry_ref(city)
-                            .and_modify(|metric| metric.update(temperature))
-                            .or_insert_with(|| Metrics::new(temperature));
-                    }
-                },
-                _ => {
-                    continue;
-                },
-            };
+            let temperature = fast_float::parse::<f32, _>(temp).unwrap();
+            map.entry_ref(city)
+                .and_modify(|metrics| metrics.update(temperature))
+                .or_insert_with(|| Metrics::new(temperature));
         }
     }
 
@@ -149,4 +132,23 @@ fn read_the_file(filename: &str) {
                 \n\t sum: {}
                 \n\t mean: {}", city.as_bstr(), ordered_map[city].min, ordered_map[city].max, ordered_map[city].sum, mean);
     }
+}
+
+fn split_once_byte(haystack: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
+    let Some(pos) = haystack.iter().position(|&b| b == needle) else {
+        return None;
+    };
+
+    Some((&haystack[..pos], &haystack[pos + 1..]))
+}
+
+fn trim_new_line(s: &[u8]) -> &[u8] {
+    let mut trimmed = s;
+    if trimmed.last_byte() == Some(b'\n') {
+        trimmed = &trimmed[..trimmed.len() - 1];
+        if trimmed.last_byte() == Some(b'\r') {
+            trimmed = &trimmed[..trimmed.len() - 1];
+        }
+    }
+    trimmed
 }

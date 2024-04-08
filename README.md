@@ -11,3 +11,5 @@ Second attempt: Remove the new string alloc on every read line. Time to complete
 Fourth attempt: Fixed some parsing issues. Time to complete: 53.23 secs
 
 Fifth attempt: Cleaned up another unnecessary parse. Time to complete: 25.67 secs
+
+Daniel's approach to parsing is a touch faster. Need to analyze why. Time to complete: 23.61 secs
