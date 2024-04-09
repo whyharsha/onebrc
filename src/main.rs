@@ -109,7 +109,7 @@ fn main() {
         }
 
         let valid_buf = &mut buf[..(bytes_read + bytes_not_processed)];
-        let last_new_line_idx = match valid_buf.iter().rposition(|&b| b == b'\n') {
+        let last_new_line_idx = match valid_buf.iter().rposition(|&b| b == NEW_LINE) {
             Some(pos) => pos,
             None => {
                 bytes_not_processed += bytes_read;
