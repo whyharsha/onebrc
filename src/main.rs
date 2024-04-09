@@ -1,35 +1,41 @@
-use std::fs::File;
-use std::io::{Read, ErrorKind};
-use threadpool;
-use hashbrown::HashMap;
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::{ErrorKind, Read},
+};
+
+use ahash::RandomState;
 use bstr::ByteSlice;
+use hashbrown::HashMap;
 
-const CHUNK_CHANNEL_BUFFER_CAP: usize = 1000;
-const CHUNK_SIZE: usize = 128 * 1024; //128kiB
+const READ_BUF_SIZE: usize = 128 * 1024; // 128 KiB
 const VALUE_SEPARATOR: u8 = b';';
+const NEW_LINE: u8 = b'\n';
+const CHANNEL_CAPACITY: usize = 1_000;
 
+#[derive(Debug, Clone, Copy)]
 struct Metrics {
+    count: u64,
+    sum: f32,
     min: f32,
     max: f32,
-    sum: f32,
-    count: u64
 }
 
 impl Metrics {
-    fn new(initial: f32) -> Metrics {
+    fn new(first_value: f32) -> Metrics {
         Metrics {
-            min: initial,
-            max: initial,
-            sum: initial,
             count: 1,
+            sum: first_value,
+            min: first_value,
+            max: first_value,
         }
     }
 
-    fn update(&mut self, next: f32) {
-        self.min = self.min.min(next);
-        self.max = self.max.max(next);
-        self.sum += next;
-        self.count += 1;    
+    fn update(&mut self, next_value: f32) {
+        self.count += 1;
+        self.sum += next_value;
+        self.min = self.min.min(next_value);
+        self.max = self.max.max(next_value);
     }
 }
 
@@ -38,117 +44,125 @@ fn mean(sum: f32, count: u64) -> f32 {
 }
 
 fn main() {
-    println!("Start reading the file.");
-    let filename = "./measurements.txt";
-    read_the_file(filename);
-}
+    let (sender, receiver) = crossbeam_channel::bounded::<Box<[u8]>>(CHANNEL_CAPACITY);
 
-fn read_the_file(filename: &str) {
-    let num_of_threads: usize = std::thread::available_parallelism().unwrap().into();
-    let thread_pool = threadpool::ThreadPool::new(num_of_threads);
+    let num_of_threads = std::thread::available_parallelism().unwrap().into();
+    let mut thread_handles = Vec::with_capacity(num_of_threads);
+    for _ in 0..num_of_threads {
+        let receiver = receiver.clone();
+        let handle = std::thread::spawn(move || {
+            let mut map = HashMap::<Box<[u8]>, Metrics, RandomState>::default();
 
-    let (chunk_sender, chunk_receiver) = crossbeam_channel::bounded::<Box::<[u8]>>(CHUNK_CHANNEL_BUFFER_CAP);
+            for buf in receiver {
+                let mut start_idx = 0;
+                let mut end_idx = 0;
 
-    let mut map = HashMap::<Box<[u8]>, Metrics>::new();
+                for (idx, elem) in (*buf).iter().enumerate() {
+                    match elem {
+                        &VALUE_SEPARATOR => {
+                            end_idx = idx;
+                        },
+                        &NEW_LINE => {
+                            let city = &buf[start_idx..end_idx];
+                            start_idx = end_idx + 1;
+            
+                            if (idx - end_idx) > 1 && city.len() > 0 {
+                                let temperature: f32 = fast_float::parse::<f32, _>(&buf[start_idx..idx]).unwrap();
+                                start_idx = idx + 1;
+            
+                                map.entry_ref(city)
+                                    .and_modify(|metric| metric.update(temperature))
+                                    .or_insert_with(|| Metrics::new(temperature));
+                            }
+                        },
+                        _ => {
+                            continue;
+                        },
+                    };
+                }
+            }
+            map
+        });
+        thread_handles.push(handle);
+    }
+    
+    drop(receiver);
 
-    let mut buffer = vec![0; CHUNK_SIZE];
-    let mut unprocessed_part  = 0;
+    let input_filename = std::env::args().nth(1).expect("No input filename");
+    let mut input_file = File::open(input_filename).unwrap();
 
-    let mut file = File::open(filename).unwrap();
-
+    let mut buf = vec![0; READ_BUF_SIZE];
+    let mut bytes_not_processed = 0;
     loop {
-        let bytes_read = match file.read(&mut buffer[unprocessed_part..]) {
+        let bytes_read = match input_file.read(&mut buf[bytes_not_processed..]) {
             Ok(n) => n,
             Err(err) => {
                 if err.kind() == ErrorKind::Interrupted {
-                    continue; // Retry
+                    continue; 
                 } else {
                     panic!("I/O error: {err:?}");
                 }
             }
         };
-
         if bytes_read == 0 {
-            break; // we've reached the end of the file
+            break; 
         }
 
-        let processed_buffer = &mut buffer[..(bytes_read + unprocessed_part)];
-
-        let new_line_index = match processed_buffer.iter().rposition(|&b| b == b'\n') {
+        let valid_buf = &mut buf[..(bytes_read + bytes_not_processed)];
+        let last_new_line_idx = match valid_buf.iter().rposition(|&b| b == b'\n') {
             Some(pos) => pos,
             None => {
-                unprocessed_part += bytes_read;
-                assert!(unprocessed_part <= buffer.len());
-                if unprocessed_part == buffer.len() {
+                bytes_not_processed += bytes_read;
+                assert!(bytes_not_processed <= buf.len());
+                if bytes_not_processed == buf.len() {
                     panic!("Found no new line in the whole read buffer");
                 }
-                continue; // Read again, maybe next read contains a new line
+                continue;
             }
         };
+        let buf_boxed = Box::<[u8]>::from(&valid_buf[..(last_new_line_idx + 1)]);
+        sender.send(buf_boxed).unwrap();
 
-        let boxed_buffer = Box::<[u8]>::from(&processed_buffer[..(new_line_index + 1)]);
-        let local_sender = chunk_sender.clone();
-
-        thread_pool.execute(move || {
-            local_sender.send(boxed_buffer).unwrap();
-        });
-
-        processed_buffer.copy_within((new_line_index + 1).., 0);
-        unprocessed_part = processed_buffer.len() - new_line_index - 1;
+        valid_buf.copy_within((last_new_line_idx + 1).., 0);
+        bytes_not_processed = valid_buf.len() - last_new_line_idx - 1;
     }
 
     // Handle the case when the file doesn't end with '\n'
-    if unprocessed_part != 0 {
+    if bytes_not_processed != 0 {
         // Send the last batch
-        let boxed_buffer = Box::<[u8]>::from(&buffer[..unprocessed_part]);
-        chunk_sender.send(boxed_buffer).unwrap();
-        unprocessed_part = 0;
-    } else {
-        drop(chunk_sender); //drop the dangling sender since you've cloned one for each chunk
+        let buf_boxed = Box::<[u8]>::from(&buf[..bytes_not_processed]);
+        sender.send(buf_boxed).unwrap();
+        bytes_not_processed = 0;
     }
 
-    for buf in chunk_receiver {
-        for raw_line in buf.lines_with_terminator() {
-            let line = trim_new_line(raw_line);
-            let (city, temp) =
-                split_once_byte(line, VALUE_SEPARATOR).expect("Separator not found");
-
-            let temperature = fast_float::parse::<f32, _>(temp).unwrap();
-            map.entry_ref(city)
-                .and_modify(|metrics| metrics.update(temperature))
-                .or_insert_with(|| Metrics::new(temperature));
+    drop(sender);
+    let mut ordered_map = BTreeMap::new();
+    for (idx, handle) in thread_handles.into_iter().enumerate() {
+        let map = handle.join().unwrap();
+        if idx == 0 {
+            ordered_map.extend(map);
+        } else {
+            for (city, stats) in map.into_iter() {
+                ordered_map
+                    .entry(city)
+                    .and_modify(|s| {
+                        s.count += stats.count;
+                        s.sum += stats.sum;
+                        s.min = s.min.min(stats.min);
+                        s.max = s.max.max(stats.max);
+                    })
+                    .or_insert(stats);
+            }
         }
     }
-
-    let mut ordered_map = std::collections::BTreeMap::new();
-    ordered_map.extend(map);
 
     for city in ordered_map.keys() {
         let mean = mean(ordered_map[city].sum, ordered_map[city].count);
 
         println!("{}:
-                \n\t min: {}
-                \n\t max: {} 
-                \n\t sum: {}
-                \n\t mean: {}", city.as_bstr(), ordered_map[city].min, ordered_map[city].max, ordered_map[city].sum, mean);
+                \t min: {}
+                \t max: {} 
+                \t sum: {}
+                \t mean: {}", city.as_bstr(), ordered_map[city].min, ordered_map[city].max, ordered_map[city].sum, mean);
     }
-}
-
-fn split_once_byte(haystack: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
-    let Some(pos) = haystack.iter().position(|&b| b == needle) else {
-        return None;
-    };
-
-    Some((&haystack[..pos], &haystack[pos + 1..]))
-}
-
-fn trim_new_line(s: &[u8]) -> &[u8] {
-    let mut trimmed = s;
-    if trimmed.last_byte() == Some(b'\n') {
-        trimmed = &trimmed[..trimmed.len() - 1];
-        if trimmed.last_byte() == Some(b'\r') {
-            trimmed = &trimmed[..trimmed.len() - 1];
-        }
-    }
-    trimmed
 }

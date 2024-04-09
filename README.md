@@ -12,4 +12,7 @@ Fourth attempt: Fixed some parsing issues. Time to complete: 53.23 secs
 
 Fifth attempt: Cleaned up another unnecessary parse. Time to complete: 25.67 secs
 
-Daniel's approach to parsing is a touch faster. Need to analyze why. Time to complete: 23.61 secs
+Turns out the parsing wasn't the problem. The threadpool was. Using Daniel's threading approach with my own parser works out just fine.
+Time to complete: 4.86 secs
+
+We can stop here, having learnt a little bit about performant code, I hope.
